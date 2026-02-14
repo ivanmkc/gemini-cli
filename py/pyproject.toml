@@ -1,0 +1,15 @@
+[project]
+name = "py"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "google-genai>=1.63.0",
+    "pexpect>=4.9.0",
+    "pytest>=9.0.2",
+]
+
+[[tool.uv.index]]
+url = "https://pypi.org/simple"
+default = true

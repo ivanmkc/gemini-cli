@@ -1,0 +1,1 @@
+session_*.log\nmetadata_*.json\ndebug.log\n.venv/\n__pycache__/\n.pytest_cache/
