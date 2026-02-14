@@ -140,9 +140,16 @@ class SimulationRunner:
         Standard orchestrator for a simulated user run.
         """
         py_dir = os.path.dirname(os.path.abspath(__file__))
-        cli_root = os.path.abspath(os.path.join(py_dir, ".."))
-        cli_entry = os.path.join(cli_root, "packages", "cli", "dist", "index.js")
+        cli_command = os.environ.get("GEMINI_CLI_COMMAND")
         
+        if cli_command:
+            base_cmd = [cli_command]
+            print(f"Using global CLI command from environment: {cli_command}")
+        else:
+            cli_root = os.path.abspath(os.path.join(py_dir, ".."))
+            cli_entry = os.path.join(cli_root, "packages", "cli", "dist", "index.js")
+            base_cmd = ["node", cli_entry]
+            
         with tempfile.TemporaryDirectory() as tmp_dir:
             print(f"--- Starting Simulation: {name} ---")
             print(f"Sandbox: {tmp_dir}")
@@ -210,16 +217,18 @@ class SimulationRunner:
                         print(f"\n--- [Turn {turn_count}: SIMULANT] ---\n{current_prompt}\n")
                         logfile.write(f"\n[Turn {turn_count}: SIMULANT]\n{current_prompt}\n")
                         
-                        cmd_args = [cli_entry, "--yolo"]
+                        cmd_args = ["--yolo"]
                         if turn_count > 1:
                             cmd_args.extend(["-r", "latest"])
                         cmd_args.extend(["-p", current_prompt])
                         
+                        full_cmd = base_cmd + cmd_args
+                        
                         # Use subprocess instead of pexpect for a clean run
                         import subprocess
-                        print(f"Executing: node {' '.join(cmd_args)}")
+                        print(f"Executing: {' '.join(full_cmd)}")
                         result = subprocess.run(
-                            ["node"] + cmd_args,
+                            full_cmd,
                             cwd=tmp_dir,
                             env=env,
                             capture_output=True,

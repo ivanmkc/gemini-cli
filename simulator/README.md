@@ -40,3 +40,16 @@ uv run tests/integration/test_secret_retrieval.py
 All interactions will be logged as human-readable transcripts to
 `session_*.log`, and all precise backend LLM outputs (thoughts, arrays,
 parameters) are saved to `metadata_*.json`.
+
+## Standalone Container Environment
+
+You can configure and run the validation suite completely independent of the
+GitHub repository context by utilizing the bundled Dockerfile. It provisions the
+environment, globally installs `@google/gemini-cli` from NPM, configures Python,
+and runs the entire suite autonomously:
+
+```bash
+cd simulator
+podman build -t gemini-simulator .
+podman run --rm -e GEMINI_API_KEY="YOUR_KEY_HERE" gemini-simulator
+```
