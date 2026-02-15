@@ -1,1 +1,6 @@
-session_*.log\nmetadata_*.json\ndebug.log\n.venv/\n__pycache__/\n.pytest_cache/
+__pycache__/
+*.log
+metadata_*.json
+structured_metadata*.json
+tmp_agent_state.json
+test_out*.txt
