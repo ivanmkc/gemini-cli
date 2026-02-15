@@ -10,7 +10,10 @@ from google import genai
 class LLMUserSimulant:
     def __init__(self, persona_script):
         self.persona_script = persona_script
-        self.client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            api_key = SimulationRunner.discover_api_key()
+        self.client = genai.Client(api_key=api_key, vertexai=False)
         self.history = []
 
     def generate_reply(self, agent_output):
@@ -26,7 +29,7 @@ class LLMUserSimulant:
         
         try:
             response = self.client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-2.0-flash",
                 contents=prompt
             )
             reply = str(response.text).strip()
@@ -135,10 +138,38 @@ class GeminiCliHarness:
 
 class SimulationRunner:
     @staticmethod
-    def run(name, persona_script, setup_func=None, verify_func=None):
+    def discover_api_key():
+        """Attempts to find the API key in the environment or user settings."""
+        key = os.environ.get("GEMINI_API_KEY")
+        if key:
+            return key
+            
+        settings_path = os.path.expanduser("~/.gemini/settings.json")
+        if os.path.exists(settings_path):
+            try:
+                with open(settings_path, 'r') as f:
+                    data = json.load(f)
+                    # Check MCP servers for a key (common fallback in this repo)
+                    mcp_servers = data.get("mcpServers", {})
+                    for server in mcp_servers.values():
+                        env = server.get("env", {})
+                        if env.get("GEMINI_API_KEY"):
+                            return env["GEMINI_API_KEY"]
+            except Exception:
+                pass
+        return None
+
+    @staticmethod
+    def run(case):
         """
-        Standard orchestrator for a simulated user run.
+        Standard orchestrator for a simulated user run using an InteractiveSimulationCase.
         """
+        # Ensure we can import the models internally
+        try:
+            from models import InteractiveSimulationCase, ActionType, CommonActions
+        except ImportError:
+            from simulator.models import InteractiveSimulationCase, ActionType, CommonActions
+            
         py_dir = os.path.dirname(os.path.abspath(__file__))
         cli_command = os.environ.get("GEMINI_CLI_COMMAND")
         
@@ -150,9 +181,25 @@ class SimulationRunner:
             cli_entry = os.path.join(cli_root, "packages", "cli", "dist", "index.js")
             base_cmd = ["node", cli_entry]
             
+        api_key = SimulationRunner.discover_api_key()
+            
         with tempfile.TemporaryDirectory() as tmp_dir:
-            print(f"--- Starting Simulation: {name} ---")
+            print(f"--- Starting Simulation: {case.name} ---")
             print(f"Sandbox: {tmp_dir}")
+            
+            # Auto-dump setup files
+            for filename, content in case.setup_files.items():
+                filepath = os.path.join(tmp_dir, filename)
+                os.makedirs(os.path.dirname(filepath), exist_ok=True)
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(content)
+                print(f"Setup: Created {filepath}")
+            
+            # Write a .env file to the workspace to ensure the CLI picks up the API key
+            if api_key:
+                with open(os.path.join(tmp_dir, ".env"), "w", encoding="utf-8") as f:
+                    f.write(f"GEMINI_API_KEY={api_key}\n")
+                print(f"Setup: Created {tmp_dir}/.env")
             
             # Create a fake HOME to isolate global config and avoid polluting user's ~/.gemini
             fake_home = os.path.join(tmp_dir, ".fake_home")
@@ -165,22 +212,18 @@ class SimulationRunner:
                 json.dump({os.path.realpath(tmp_dir): "TRUST_FOLDER"}, f)
                 
             # Pre-seed settings to bypass the authentication prompt by setting the selectedType
-            settings_file = os.path.join(fake_home, ".gemini", "config", "settings.json")
+            settings_file = os.path.join(fake_home, ".gemini", "settings.json")
             os.makedirs(os.path.dirname(settings_file), exist_ok=True)
             with open(settings_file, "w") as f:
                 json.dump({
                     "security": {
                         "auth": {
-                            "selectedType": "use_gemini"
+                            "selectedType": "gemini-api-key"
                         }
                     }
                 }, f)
             
-            if setup_func:
-                setup_func(tmp_dir)
-            
-            simulant = LLMUserSimulant(persona_script)
-            log_path = os.path.join(py_dir, f"session_{name.lower().replace(' ', '_')}.log")
+            log_path = os.path.join(py_dir, f"session_{case.name.lower().replace(' ', '_')}.log")
             
             # Start simulation
             success = False
@@ -196,6 +239,8 @@ class SimulationRunner:
                 env["NO_UPDATE_NOTIFIER"] = "1"
                 env["UPDATE_NOTIFIER_LIB_DISABLE"] = "1"
                 env["DEV"] = "true"
+                if api_key:
+                    env["GEMINI_API_KEY"] = api_key
                 
                 debug_log = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug.log")
                 if os.path.exists(debug_log):
@@ -204,15 +249,17 @@ class SimulationRunner:
                 env["HOME"] = fake_home
 
                 turn_count = 0
-                max_turns = 10
+                current_prompt = case.initial_prompt
                 
-                # The first prompt is an empty string so the agent initiates the conversation
-                # Or we can just send the first persona reply immediately
-                first_prompt = simulant.generate_reply("Hello! How can I help you today?")
-                current_prompt = first_prompt
+                # Setup LLM Simulant specifically for LLMReactors
+                api_key = os.environ.get("GEMINI_API_KEY")
+                if not api_key:
+                    api_key = SimulationRunner.discover_api_key()
+                
+                llm_engine = genai.Client(api_key=api_key, vertexai=False) if api_key else None
                 
                 with open(log_path, "w") as logfile:
-                    while turn_count < max_turns:
+                    while turn_count < case.max_turns:
                         turn_count += 1
                         print(f"\n--- [Turn {turn_count}: SIMULANT] ---\n{current_prompt}\n")
                         logfile.write(f"\n[Turn {turn_count}: SIMULANT]\n{current_prompt}\n")
@@ -242,12 +289,58 @@ class SimulationRunner:
                         if result.returncode != 0:
                             print(f"CLI Error Output:\n{result.stderr}")
                             
-                        simulated_reply = simulant.generate_reply(agent_text)
+                        # --- Evaluate Reactors ---
+                        selected_action = case.default_action
                         
-                        if "TEST_COMPLETE" in simulated_reply:
+                        for reactor in case.reactors:
+                            if reactor.reactor_type == "regex":
+                                if re.search(reactor.pattern, agent_text, re.IGNORECASE):
+                                    selected_action = reactor.action
+                                    break
+                            elif reactor.reactor_type == "llm":
+                                if not llm_engine:
+                                    print("Warning: LLMReactor triggered but no GEMINI_API_KEY found. Skipping.")
+                                    continue
+                                
+                                # Ask Gemini if this reactor's goal is met
+                                prompt = (
+                                    f"Given the agent's response:\n'{agent_text}'\n\n"
+                                    f"Evaluate this user rule/goal: '{reactor.goal_prompt}'.\n"
+                                    f"If the goal is applicable and you should respond, output 'RESPOND: [your response]'.\n"
+                                    f"If the goal implies the task is finished/successful, output 'END_TEST: [reason]'.\n"
+                                    f"If the goal implies the agent failed dangerously, output 'FAIL_TEST: [reason]'.\n"
+                                    f"If the goal is NOT relevant to what the agent just said, output 'IGNORE'."
+                                )
+                                response = llm_engine.models.generate_content(
+                                    model="gemini-2.0-flash",
+                                    contents=prompt
+                                )
+                                reply = str(response.text).strip()
+                                
+                                if reply.startswith("RESPOND:"):
+                                    selected_action = CommonActions.DONT_KNOW.model_copy(update={"payload": reply.replace("RESPOND:", "").strip()})
+                                    break
+                                elif reply.startswith("END_TEST:"):
+                                    selected_action = CommonActions.SUCCESS_END.model_copy(update={"payload": reply.replace("END_TEST:", "").strip()})
+                                    break
+                                elif reply.startswith("FAIL_TEST:"):
+                                    selected_action = CommonActions.GIVE_UP_FAIL.model_copy(update={"payload": reply.replace("FAIL_TEST:", "").strip()})
+                                    break
+                                # If IGNORE, continue to next reactor
+                                
+                        print(f"[Reactor Engaged] Action: {selected_action.type.value} | Payload: {selected_action.payload}")
+                        
+                        if selected_action.type == ActionType.FAIL_TEST:
+                            success = False
+                            print(f"Simulation FAILED triggered: {selected_action.payload}")
                             break
                             
-                        current_prompt = simulated_reply
+                        if selected_action.type == ActionType.END_TEST:
+                            success = True
+                            print(f"Simulation END triggered: {selected_action.payload}")
+                            break
+                            
+                        current_prompt = selected_action.payload or "Okay."
                 
                 # Mock harness interface for test scripts that expect it
                 class MockHarness:
@@ -259,14 +352,39 @@ class SimulationRunner:
                 
                 mock_harness = MockHarness(fake_home, log_path)
                 
-                # Run custom verification
-                if verify_func:
-                    success = verify_func(tmp_dir, mock_harness)
-                else:
-                    success = True # Default to success if script completed
+                # --- Post-Execution Verification ---
+                
+                # 1. Automatic File Verification
+                if success: # Only verify files if the test didn't explicitly FAIL out
+                    for file_exp in case.expected_files:
+                        test_path = os.path.join(tmp_dir, file_exp.path)
+                        exists = os.path.exists(test_path)
+                        
+                        if exists != file_exp.exists:
+                            success = False
+                            print(f"Verification Failed: {file_exp.path} exists={exists} (Expected {file_exp.exists})")
+                            break
+                            
+                        if exists and file_exp.exists:
+                            with open(test_path, 'r', encoding='utf-8') as f:
+                                content = f.read()
+                                
+                            if file_exp.exact_content is not None and content != file_exp.exact_content:
+                                success = False
+                                print(f"Verification Failed: {file_exp.path} exact content validation failed.")
+                                break
+                                
+                            if file_exp.contains_text is not None and file_exp.contains_text not in content:
+                                success = False
+                                print(f"Verification Failed: {file_exp.path} substring validation failed.")
+                                break
+
+                # 2. Custom code verification fallback
+                if success and case.custom_verify:
+                    success = case.custom_verify(tmp_dir, mock_harness)
                     
                 # Extract metadata
-                metadata_path = os.path.join(py_dir, f"metadata_{name.lower().replace(' ', '_')}.json")
+                metadata_path = os.path.join(py_dir, f"metadata_{case.name.lower().replace(' ', '_')}.json")
                 if mock_harness.extract_latest_session(fake_home, target_path=metadata_path):
                     print(f"Metadata extracted to {metadata_path}")
                     
@@ -275,5 +393,5 @@ class SimulationRunner:
                 import traceback
                 traceback.print_exc()
                 
-            print(f"--- Simulation {name} Finished (Success: {success}) ---\n")
+            print(f"--- Simulation {case.name} Finished (Success: {success}) ---\n")
             return success

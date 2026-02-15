@@ -1,39 +1,37 @@
 import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
-import os
 from simulator import SimulationRunner
+from models import (
+    InteractiveSimulationCase, 
+    RegexReactor, 
+    ActionType, 
+    ReactorAction,
+    CommonActions
+)
 
 def run_skills_test():
     secret_key = "GOLDEN_SKILL_CAPTURED"
     
-    def setup(tmp_dir):
-        skills_dir = os.path.join(tmp_dir, ".agents", "skills", "mock-skill")
-        os.makedirs(skills_dir, exist_ok=True)
-        skill_content = f"""# Mock Skill
-This is a test skill. The secret key is '{secret_key}'.
-"""
-        with open(os.path.join(skills_dir, "SKILL.md"), "w", encoding="utf-8") as f:
-            f.write(skill_content)
-        print(f"Setup: Created mock-skill in {skills_dir}")
-
-    def verify(tmp_dir, harness):
-        with open(harness.log_file_path, "r", encoding="utf-8") as f:
-            content = f.read()
-        return secret_key in content
-
-    persona_script = (
-        f"1. Start by saying 'Checking for local skills'.\n"
-        f"2. Find and read the mock-skill in the workspace.\n"
-        f"3. Tell me the secret key found in the skill.\n"
-        f"4. Finally, say 'TEST_COMPLETE'.\n"
-    )
-
-    SimulationRunner.run(
+    case = InteractiveSimulationCase(
         name="Skills Support",
-        persona_script=persona_script,
-        setup_func=setup,
-        verify_func=verify
+        initial_prompt="Checking for local skills. Please find and read any mock-skills in the workspace and tell me the secret key found within.",
+        setup_files={
+            ".agents/skills/mock-skill/SKILL.md": f"# Mock Skill\nThis is a test skill. The secret key is '{secret_key}'.\n"
+        },
+        reactors=[
+            RegexReactor(
+                pattern=secret_key,
+                action=ReactorAction(
+                    type=ActionType.END_TEST,
+                    payload=f"Correct, the key is {secret_key}. Test complete."
+                )
+            )
+        ],
+        default_action=CommonActions.DONT_KNOW
     )
+
+    SimulationRunner.run(case)
 
 if __name__ == "__main__":
     run_skills_test()
+
