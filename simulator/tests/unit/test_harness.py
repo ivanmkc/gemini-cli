@@ -1,29 +1,20 @@
 import os
 import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
-import hashlib
 import json
 import pytest
 from unittest.mock import MagicMock, patch
 from simulator import GeminiCliHarness
 
-def test_harness_environment_setup():
-    with patch('pexpect.spawn') as mock_spawn:
-        harness = GeminiCliHarness(command="node", args=["index.js"], cwd="/tmp", log_file_path="/tmp/log.txt")
-        
-        # Verify pexpect was called
-        mock_spawn.assert_called_once()
-        
-        # Capture the env passed to spawn
-        args, kwargs = mock_spawn.call_args
-        env = kwargs.get('env')
-        
-        assert env["GEMINI_DEBUG_LOG_FILE"].endswith("debug.log")
-        assert env["NO_COLOR"] == "true"
+def test_harness_get_base_cmd():
+    harness = GeminiCliHarness(fake_home="/tmp/fake_home", log_file_path="/tmp/log.txt")
+    cmd = harness.get_base_cmd("/tmp/py_dir")
+    assert cmd[0] == "node"
+    assert "index.js" in cmd[1]
 
 def test_extract_latest_session(tmp_path):
-    # Setup a mock .gemini/tmp structure
-    harness = GeminiCliHarness.__new__(GeminiCliHarness)
+    # Setup a mock .gemini/tmp structure using the updated Harness constructor
+    harness = GeminiCliHarness(fake_home=str(tmp_path), log_file_path="/tmp/log.txt")
     
     chats_dir = tmp_path / ".gemini" / "tmp" / "mock_hash" / "chats"
     chats_dir.mkdir(parents=True)
@@ -42,7 +33,7 @@ def test_extract_latest_session(tmp_path):
     with patch('glob.glob', return_value=[str(file1), str(file2)]):
         with patch('os.path.exists', return_value=True):
             target = str(tmp_path / "extracted.json")
-            result = harness.extract_latest_session(fake_home=str(tmp_path), target_path=target)
+            result = harness.extract_latest_session(target_path=target)
             
             assert result == target
             with open(target, 'r') as f:

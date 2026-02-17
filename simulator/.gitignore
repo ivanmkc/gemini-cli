@@ -4,3 +4,4 @@ metadata_*.json
 structured_metadata*.json
 tmp_agent_state.json
 test_out*.txt
+.env

@@ -8,16 +8,17 @@ import tempfile
 from google import genai
 
 class LLMUserSimulant:
-    def __init__(self, persona_script):
-        self.persona_script = persona_script
-        api_key = os.environ.get("GEMINI_API_KEY")
+    def __init__(self, persona_script: str, model: str = "gemini-2.0-flash") -> None:
+        self.persona_script: str = persona_script
+        self.model: str = model
+        api_key: str | None = os.environ.get("GEMINI_API_KEY")
         if not api_key:
             api_key = SimulationRunner.discover_api_key()
-        self.client = genai.Client(api_key=api_key, vertexai=False)
-        self.history = []
+        self.client: genai.Client = genai.Client(api_key=api_key, vertexai=False)
+        self.history: list[dict[str, str]] = []
 
-    def generate_reply(self, agent_output):
-        prompt = (
+    def generate_reply(self, agent_output: str) -> str:
+        prompt: str = (
             f"You are a human user testing a CLI agent. Follow this script EXACTLY:\n"
             f"{self.persona_script}\n\n"
             f"The agent just said:\n{agent_output}\n\n"
@@ -29,112 +30,116 @@ class LLMUserSimulant:
         
         try:
             response = self.client.models.generate_content(
-                model="gemini-2.0-flash",
+                model=self.model,
                 contents=prompt
             )
-            reply = str(response.text).strip()
+            reply: str = str(response.text).strip()
             self.history.append({"agent": agent_output, "user": reply})
             return reply
         except Exception as e:
             print(f"DEBUG: Simulant failed to generate text (blocked or empty): {e}")
             return "TEST_COMPLETE"
 
-class GeminiCliHarness:
-    def __init__(self, command, args, cwd, log_file_path, fake_home=None):
-        self.command = command
-        self.args = args
-        self.cwd = cwd
-        self.log_file_path = log_file_path
+from abc import ABC, abstractmethod
+
+class BaseSimulatorHarness(ABC):
+    def __init__(self, fake_home: str, log_file_path: str):
         self.fake_home = fake_home
+        self.log_file_path = log_file_path
         
-        # Clear the debug log at startup to ensure fresh session extraction
-        debug_log = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug.log")
-        if os.path.exists(debug_log):
-            open(debug_log, 'w').close()
-            
-        print(f"Starting gemini-cli driver: {command} {' '.join(args)} in {cwd}")
-        
-        env = os.environ.copy()
-        env["GEMINI_APPROVAL_MODE"] = "yolo"
-        env["NO_COLOR"] = "true"
-        env["NODE_ENV"] = "development"
-        # Try to bypass registry issues that might be inherited
-        env["NPM_CONFIG_REGISTRY"] = "https://registry.npmjs.org/"
-        # Disable auto-updates during tests
-        env["GEMINI_DISABLE_AUTO_UPDATE"] = "1"
-        env["NO_UPDATE_NOTIFIER"] = "1"
-        env["UPDATE_NOTIFIER_LIB_DISABLE"] = "1"
-        env["DEV"] = "true"  # Bypasses internal updateCheck.ts in gemini-cli
-        env["GEMINI_DEBUG_LOG_FILE"] = debug_log
-        
-        if fake_home:
-            env["HOME"] = fake_home
-        
-        self.child = pexpect.spawn(
-            command,
-            args,
-            cwd=cwd,
-            encoding="utf-8",
-            timeout=180,
-            env=env
-        )
-        self.logfile = open(log_file_path, "w", encoding="utf-8")
-        self.child.logfile = self.logfile
+    @abstractmethod
+    def get_base_cmd(self, py_dir: str) -> list[str]:
+        pass
 
-    def expect_and_capture(self, pattern, timeout=180):
-        try:
-            return self.child.expect(pattern, timeout=timeout)
-        except pexpect.EOF:
-            print(f"Error: End Of File (EOF). {self.child.before}")
-            return -1
-        except pexpect.TIMEOUT:
-            print(f"Error: Timeout after {timeout} seconds. {self.child.before}")
-            return -2
+    @abstractmethod
+    def get_turn_args(self, turn_count: int, prompt: str) -> list[str]:
+        pass
 
-    def send_user_reply(self, text: str):
-        # The gemini-cli accepts multi-line input and requires shift+tab to submit if it sees newlines.
-        # To avoid complex keypress simulation, we ensure our reply is a single line.
-        single_line_text = text.replace('\n', ' ').replace('\r', ' ')
-        print(f"\n[Turn: SIMULANT]\n{single_line_text}\n")
-        self.child.send(single_line_text + "\r")
+    @abstractmethod
+    def extract_latest_session(self, target_path: str) -> str | None:
+        pass
 
-    def get_agent_turn_text(self):
-        try:
-            content = self.child.before or ""
-            clean_content = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', content)
-            return clean_content.strip()
-        except Exception as e:
-            return ""
+class GeminiCliHarness(BaseSimulatorHarness):
+    def get_base_cmd(self, py_dir: str) -> list[str]:
+        cli_command = os.environ.get("GEMINI_CLI_COMMAND")
+        if cli_command:
+            print(f"Using global CLI command from environment: {cli_command}")
+            return [cli_command]
+        cli_root = os.path.abspath(os.path.join(py_dir, ".."))
+        cli_entry = os.path.join(cli_root, "packages", "cli", "dist", "index.js")
+        return ["node", cli_entry]
 
-    def extract_latest_session(self, fake_home, target_path="structured_metadata.json"):
-        if fake_home:
-            base_tmp_dir = os.path.join(fake_home, ".gemini", "tmp")
+    def get_turn_args(self, turn_count: int, prompt: str) -> list[str]:
+        cmd_args = ["--yolo"]
+        if turn_count > 1:
+            cmd_args.extend(["-r", "latest"])
+        cmd_args.extend(["-p", prompt])
+        return cmd_args
+
+    def extract_latest_session(self, target_path: str) -> str | None:
+        if self.fake_home:
+            base_tmp_dir = os.path.join(self.fake_home, ".gemini", "tmp")
         else:
             base_tmp_dir = os.path.expanduser("~/.gemini/tmp")
             
         if not os.path.exists(base_tmp_dir):
             return None
             
+        import glob
         session_files = glob.glob(os.path.join(base_tmp_dir, "**/chats/session-*.json"), recursive=True)
         if not session_files:
             return None
             
         latest_file = max(session_files, key=os.path.getmtime)
         try:
+            import json
             with open(latest_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            
             with open(target_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2)
-                    
             return target_path
         except Exception as e:
             print(f"DEBUG: Failed to extract session: {e}")
             return None
 
-    def close(self):
-        self.child.close()
-        self.logfile.close()
+class ClaudeCodeHarness(BaseSimulatorHarness):
+    def get_base_cmd(self, py_dir: str) -> list[str]:
+        base_cmd = ["npx", "-y", "@anthropic-ai/claude-code"]
+        print(f"Using Claude Code backend: {base_cmd}")
+        return base_cmd
+
+    def get_turn_args(self, turn_count: int, prompt: str) -> list[str]:
+        return ["-p", prompt]
+
+    def extract_latest_session(self, target_path: str) -> str | None:
+        # Claude code might not export sessions exactly the same way, stubbing it.
+        return None
+
+class AntigravityHarness(BaseSimulatorHarness):
+    def get_base_cmd(self, py_dir: str) -> list[str]:
+        base_cmd = ["antigravity"]
+        print(f"Using Antigravity backend: {base_cmd}")
+        return base_cmd
+
+    def get_turn_args(self, turn_count: int, prompt: str) -> list[str]:
+        # Assuming '-p' for passing a prompt, matching other standard CLIs
+        return ["-p", prompt]
+
+    def extract_latest_session(self, target_path: str) -> str | None:
+        return None
+
+class CodexHarness(BaseSimulatorHarness):
+    def get_base_cmd(self, py_dir: str) -> list[str]:
+        base_cmd = ["codex"]
+        print(f"Using Codex backend: {base_cmd}")
+        return base_cmd
+
+    def get_turn_args(self, turn_count: int, prompt: str) -> list[str]:
+        # Assuming '-p' for passing a prompt, matching other standard CLIs
+        return ["-p", prompt]
+
+    def extract_latest_session(self, target_path: str) -> str | None:
+        return None
 
 class SimulationRunner:
     @staticmethod
@@ -160,7 +165,7 @@ class SimulationRunner:
         return None
 
     @staticmethod
-    def run(case):
+    def run(case, backend="gemini-cli", output_dir=None):
         """
         Standard orchestrator for a simulated user run using an InteractiveSimulationCase.
         """
@@ -171,15 +176,10 @@ class SimulationRunner:
             from simulator.models import InteractiveSimulationCase, ActionType, CommonActions
             
         py_dir = os.path.dirname(os.path.abspath(__file__))
-        cli_command = os.environ.get("GEMINI_CLI_COMMAND")
         
-        if cli_command:
-            base_cmd = [cli_command]
-            print(f"Using global CLI command from environment: {cli_command}")
-        else:
-            cli_root = os.path.abspath(os.path.join(py_dir, ".."))
-            cli_entry = os.path.join(cli_root, "packages", "cli", "dist", "index.js")
-            base_cmd = ["node", cli_entry]
+        base_out = output_dir or os.path.join(py_dir, "outputs")
+        run_out_dir = os.path.join(base_out, backend)
+        os.makedirs(run_out_dir, exist_ok=True)
             
         api_key = SimulationRunner.discover_api_key()
             
@@ -187,7 +187,23 @@ class SimulationRunner:
             print(f"--- Starting Simulation: {case.name} ---")
             print(f"Sandbox: {tmp_dir}")
             
-            # Auto-dump setup files
+            extracted_output = None
+            
+            # Auto-dump setup files from directory
+            if getattr(case, 'setup_dir', None) and os.path.exists(case.setup_dir):
+                import shutil
+                for root, dirs, files in os.walk(case.setup_dir):
+                    for file in files:
+                        src_path = os.path.join(root, file)
+                        rel_path = os.path.relpath(src_path, case.setup_dir)
+                        # Skip special directories or self-references if needed
+                        if rel_path.startswith(".") or "__pycache__" in rel_path:
+                            continue
+                        dest_path = os.path.join(tmp_dir, rel_path)
+                        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                        shutil.copy2(src_path, dest_path)
+                print(f"Setup: Seeded workspace from {case.setup_dir}")
+
             for filename, content in case.setup_files.items():
                 filepath = os.path.join(tmp_dir, filename)
                 os.makedirs(os.path.dirname(filepath), exist_ok=True)
@@ -214,16 +230,41 @@ class SimulationRunner:
             # Pre-seed settings to bypass the authentication prompt by setting the selectedType
             settings_file = os.path.join(fake_home, ".gemini", "settings.json")
             os.makedirs(os.path.dirname(settings_file), exist_ok=True)
-            with open(settings_file, "w") as f:
-                json.dump({
-                    "security": {
-                        "auth": {
-                            "selectedType": "gemini-api-key"
-                        }
-                    }
-                }, f)
             
-            log_path = os.path.join(py_dir, f"session_{case.name.lower().replace(' ', '_')}.log")
+            settings_data = {}
+            if os.path.exists(settings_file):
+                try:
+                    with open(settings_file, "r") as f:
+                        settings_data = json.load(f)
+                except Exception:
+                    pass
+            
+            if "security" not in settings_data:
+                settings_data["security"] = {}
+            if "auth" not in settings_data["security"]:
+                settings_data["security"]["auth"] = {}
+                
+            settings_data["security"]["auth"]["selectedType"] = "gemini-api-key"
+            
+            with open(settings_file, "w") as f:
+                json.dump(settings_data, f)
+            
+            case_slug = case.name.lower().replace(' ', '_')
+            case_out_dir = os.path.join(run_out_dir, case_slug)
+            os.makedirs(case_out_dir, exist_ok=True)
+            
+            log_path = os.path.join(case_out_dir, "session.log")
+            
+            if backend == "claude-code":
+                harness = ClaudeCodeHarness(fake_home, log_path)
+            elif backend == "antigravity":
+                harness = AntigravityHarness(fake_home, log_path)
+            elif backend == "codex":
+                harness = CodexHarness(fake_home, log_path)
+            else:
+                harness = GeminiCliHarness(fake_home, log_path)
+                
+            base_cmd = harness.get_base_cmd(py_dir)
             
             # Start simulation
             success = False
@@ -251,12 +292,31 @@ class SimulationRunner:
                 turn_count = 0
                 current_prompt = case.initial_prompt
                 
+                # Automatically append output schema instructions if requested
+                if case.output_schema is not None:
+                    schema_json = json.dumps(case.output_schema.model_json_schema(), indent=2)
+                    schema_instruction = (
+                        f"\n\nCRITICAL OUTPUT REQUIREMENT:\n"
+                        f"When you have finished your task, you MUST write your final response "
+                        f"to a file named 'output.json' in the current directory.\n"
+                        f"The content of 'output.json' MUST strictly conform to this JSON schema:\n"
+                        f"{schema_json}\n"
+                    )
+                    current_prompt += schema_instruction
+                
                 # Setup LLM Simulant specifically for LLMReactors
                 api_key = os.environ.get("GEMINI_API_KEY")
                 if not api_key:
                     api_key = SimulationRunner.discover_api_key()
                 
-                llm_engine = genai.Client(api_key=api_key, vertexai=False) if api_key else None
+                use_vertex = os.environ.get("GOOGLE_GENAI_USE_VERTEXAI") == "1"
+                
+                if use_vertex:
+                    llm_engine = genai.Client(vertexai=True, project=os.environ.get("GOOGLE_CLOUD_PROJECT"), location=os.environ.get("GOOGLE_CLOUD_LOCATION"))
+                elif api_key:
+                    llm_engine = genai.Client(api_key=api_key, vertexai=False)
+                else:
+                    llm_engine = None
                 
                 with open(log_path, "w") as logfile:
                     while turn_count < case.max_turns:
@@ -264,10 +324,7 @@ class SimulationRunner:
                         print(f"\n--- [Turn {turn_count}: SIMULANT] ---\n{current_prompt}\n")
                         logfile.write(f"\n[Turn {turn_count}: SIMULANT]\n{current_prompt}\n")
                         
-                        cmd_args = ["--yolo"]
-                        if turn_count > 1:
-                            cmd_args.extend(["-r", "latest"])
-                        cmd_args.extend(["-p", current_prompt])
+                        cmd_args = harness.get_turn_args(turn_count, current_prompt)
                         
                         full_cmd = base_cmd + cmd_args
                         
@@ -292,65 +349,83 @@ class SimulationRunner:
                         # --- Evaluate Reactors ---
                         selected_action = case.default_action
                         
+                        logfile.write(f"\n[EVALUATING REACTORS]\n")
+                        logfile.write(f"Default Action: {selected_action.type.value} | Payload: {selected_action.payload}\n")
+                        
                         for reactor in case.reactors:
+                            logfile.write(f"- Checking Reactor: type={reactor.reactor_type}\n")
                             if reactor.reactor_type == "regex":
+                                logfile.write(f"  Regex Pattern: '{reactor.pattern}'\n")
                                 if re.search(reactor.pattern, agent_text, re.IGNORECASE):
                                     selected_action = reactor.action
+                                    logfile.write(f"  -> MATCHED! Selected Action: {selected_action.type.value} | Payload: {selected_action.payload}\n")
                                     break
+                                else:
+                                    logfile.write(f"  -> No match.\n")
                             elif reactor.reactor_type == "llm":
+                                logfile.write(f"  Goal Prompt: '{reactor.goal_prompt}'\n")
                                 if not llm_engine:
-                                    print("Warning: LLMReactor triggered but no GEMINI_API_KEY found. Skipping.")
+                                    msg = "Warning: LLMReactor triggered but no GEMINI_API_KEY found. Skipping."
+                                    print(msg)
+                                    logfile.write(f"  -> {msg}\n")
                                     continue
                                 
                                 # Ask Gemini if this reactor's goal is met
                                 prompt = (
-                                    f"Given the agent's response:\n'{agent_text}'\n\n"
-                                    f"Evaluate this user rule/goal: '{reactor.goal_prompt}'.\n"
-                                    f"If the goal is applicable and you should respond, output 'RESPOND: [your response]'.\n"
-                                    f"If the goal implies the task is finished/successful, output 'END_TEST: [reason]'.\n"
-                                    f"If the goal implies the agent failed dangerously, output 'FAIL_TEST: [reason]'.\n"
-                                    f"If the goal is NOT relevant to what the agent just said, output 'IGNORE'."
+                                    f"History:\n{logfile_content[-2000:] if 'logfile_content' in locals() else 'No history.'}\n\n"
+                                    f"Agent's latest response:\n'{agent_text}'\n\n"
+                                    f"Current User Goal: '{reactor.goal_prompt}'\n\n"
+                                    "Is the User Goal met or specifically addressed by the Agent's latest response?\n"
+                                    "If YES, should the user take the action associated with this goal? (e.g. they answered the question or achieved the milestone)\n"
+                                    "If YES, output 'MATCH: [optional brief reasoning]'.\n"
+                                    "If the agent is asking a clarifying question that prevents this goal from being met, but you want to respond specifically, output 'RESPOND: [your response]'.\n"
+                                    "Otherwise, output 'IGNORE'."
                                 )
+                                # Read back the log to give context if needed (simplified here)
                                 response = llm_engine.models.generate_content(
                                     model="gemini-2.0-flash",
                                     contents=prompt
                                 )
                                 reply = str(response.text).strip()
+                                logfile.write(f"  -> LLM Evaluator Response: '{reply}'\n")
                                 
-                                if reply.startswith("RESPOND:"):
-                                    selected_action = CommonActions.DONT_KNOW.model_copy(update={"payload": reply.replace("RESPOND:", "").strip()})
+                                if reply.startswith("MATCH:"):
+                                    selected_action = reactor.action
+                                    logfile.write(f"  -> MATCHED! Selected Action: {selected_action.type.value} | Payload: {selected_action.payload}\n")
                                     break
-                                elif reply.startswith("END_TEST:"):
-                                    selected_action = CommonActions.SUCCESS_END.model_copy(update={"payload": reply.replace("END_TEST:", "").strip()})
+                                elif reply.startswith("RESPOND:"):
+                                    # Override action with dynamic response if LLM specifically suggests one
+                                    extracted_payload = reply.replace("RESPOND:", "").strip()
+                                    selected_action = ReactorAction(
+                                        type=ActionType.RESPOND, 
+                                        payload=extracted_payload
+                                    )
+                                    logfile.write(f"  -> DYNAMIC RESPONSE! Selected Action: RESPOND | Payload: {extracted_payload}\n")
                                     break
-                                elif reply.startswith("FAIL_TEST:"):
-                                    selected_action = CommonActions.GIVE_UP_FAIL.model_copy(update={"payload": reply.replace("FAIL_TEST:", "").strip()})
-                                    break
-                                # If IGNORE, continue to next reactor
+                                else:
+                                    logfile.write(f"  -> No match (IGNORED).\n")
                                 
-                        print(f"[Reactor Engaged] Action: {selected_action.type.value} | Payload: {selected_action.payload}")
+                        msg = f"[Reactor Engaged] Action: {selected_action.type.value} | Payload: {selected_action.payload}"
+                        print(msg)
+                        logfile.write(f"\n{msg}\n")
                         
                         if selected_action.type == ActionType.FAIL_TEST:
                             success = False
-                            print(f"Simulation FAILED triggered: {selected_action.payload}")
+                            msg_fail = f"Simulation FAILED triggered: {selected_action.payload}"
+                            print(msg_fail)
+                            logfile.write(f"{msg_fail}\n")
                             break
                             
                         if selected_action.type == ActionType.END_TEST:
                             success = True
-                            print(f"Simulation END triggered: {selected_action.payload}")
+                            msg_end = f"Simulation END triggered: {selected_action.payload}"
+                            print(msg_end)
+                            logfile.write(f"{msg_end}\n")
                             break
                             
                         current_prompt = selected_action.payload or "Okay."
                 
-                # Mock harness interface for test scripts that expect it
-                class MockHarness:
-                    def __init__(self, fake_home, log_file_path):
-                        self.fake_home = fake_home
-                        self.log_file_path = log_file_path
-                    def extract_latest_session(self, home, target_path):
-                        return GeminiCliHarness.extract_latest_session(None, home, target_path)
-                
-                mock_harness = MockHarness(fake_home, log_path)
+
                 
                 # --- Post-Execution Verification ---
                 
@@ -381,12 +456,31 @@ class SimulationRunner:
 
                 # 2. Custom code verification fallback
                 if success and case.custom_verify:
-                    success = case.custom_verify(tmp_dir, mock_harness)
+                    success = case.custom_verify(tmp_dir, harness)
                     
                 # Extract metadata
-                metadata_path = os.path.join(py_dir, f"metadata_{case.name.lower().replace(' ', '_')}.json")
-                if mock_harness.extract_latest_session(fake_home, target_path=metadata_path):
+                metadata_path = os.path.join(case_out_dir, "metadata.json")
+                if harness.extract_latest_session(target_path=metadata_path):
                     print(f"Metadata extracted to {metadata_path}")
+                    
+                # Extract structured output if requested
+                output_json_path = os.path.join(tmp_dir, "output.json")
+                if success and case.output_schema is not None:
+                    if os.path.exists(output_json_path):
+                        try:
+                            saved_json_path = os.path.join(case_out_dir, "output.json")
+                            import shutil
+                            shutil.copy2(output_json_path, saved_json_path)
+                            with open(saved_json_path, 'r', encoding='utf-8') as f:
+                                json_data = json.load(f)
+                            extracted_output = case.output_schema(**json_data)
+                            print(f"Successfully extracted and typed output.json into {case.output_schema.__name__}")
+                        except Exception as e:
+                            success = False
+                            print(f"Failed to parse output.json against {case.output_schema.__name__} schema: {e}")
+                    else:
+                        success = False
+                        print(f"Failed: Agent did not produce the required output.json file.")
                     
             except Exception as e:
                 print(f"Simulation Error: {e}")
@@ -394,4 +488,19 @@ class SimulationRunner:
                 traceback.print_exc()
                 
             print(f"--- Simulation {case.name} Finished (Success: {success}) ---\n")
-            return success
+            
+            # Formulate the final result object
+            from models import SimulationResult, SimulationTranscript
+            transcript = SimulationTranscript(
+                case_name=case.name,
+                backend=backend,
+                turns=[] # Stubbed for brevity, would populate from history
+            )
+            
+            return SimulationResult(
+                case_name=case.name,
+                backend=backend,
+                success=success,
+                transcript=transcript,
+                extracted_output=extracted_output
+            )
