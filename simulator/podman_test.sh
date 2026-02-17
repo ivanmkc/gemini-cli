@@ -16,6 +16,20 @@ if [ -z "$ANTHROPIC_API_KEY" ]; then
     export ANTHROPIC_API_KEY=$(python3 -c "import json, os; print(json.load(open(os.path.expanduser('~/.gemini/settings.json'))).get('apiKeys', {}).get('anthropic', '') if os.path.exists(os.path.expanduser('~/.gemini/settings.json')) else '')" 2>/dev/null || echo "")
 fi
 
+# Generate timestamp for output consolidation
+RUN_TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+export RUN_TIMESTAMP
+echo "Test Run Timestamp: ${RUN_TIMESTAMP}"
+
+RUN_OUT_DIR="outputs/${RUN_TIMESTAMP}"
+mkdir -p "${RUN_OUT_DIR}"
+
+CLAUDE_MOUNT=""
+if [ -f "$HOME/.claude.json" ]; then
+    cp "$HOME/.claude.json" "${RUN_OUT_DIR}/.claude.json"
+    CLAUDE_MOUNT="-v $(pwd)/${RUN_OUT_DIR}/.claude.json:/root/.claude.json"
+fi
+
 echo "=== Building Gemini Test Image ==="
 podman build -t simulator-test-gemini -f Dockerfile.gemini .
 
@@ -36,11 +50,12 @@ podman run --rm \
         python3 -m venv venv-linux && \
         ./venv-linux/bin/pip install pydantic google-genai pytest pexpect --index-url=https://pypi.org/simple && \
         echo \"=== Running Tests: Gemini CLI ===\" && \
-        ./venv-linux/bin/pytest tests/integration/ --backend=gemini-cli"
+        ./venv-linux/bin/pytest tests/integration/ --backend=gemini-cli --output-dir=/workspace/simulator/outputs/${RUN_TIMESTAMP}" || true
 
 echo "=== Running Simulation Tests in Podman: Claude Code ==="
 podman run --rm \
     -v $(pwd)/..:/workspace \
+    $CLAUDE_MOUNT \
     -w /workspace/simulator \
     -e GEMINI_API_KEY="${GEMINI_API_KEY}" \
     -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY}" \
@@ -52,4 +67,26 @@ podman run --rm \
         python3 -m venv venv-linux && \
         ./venv-linux/bin/pip install pydantic google-genai pytest pexpect --index-url=https://pypi.org/simple && \
         echo \"=== Running Tests: Claude Code ===\" && \
-        ./venv-linux/bin/pytest tests/integration/ --backend=claude-code"
+        ./venv-linux/bin/pytest tests/integration/ --backend=claude-code --output-dir=/workspace/simulator/outputs/${RUN_TIMESTAMP}" || true
+
+echo "=== Generating Final Summary Report ==="
+python3 -c "
+import os, json, glob
+res_dir = 'outputs/${RUN_TIMESTAMP}'
+report = [f'# Simulation Run Report: {res_dir}']
+if os.path.exists(res_dir):
+    for backend in os.listdir(res_dir):
+        back_dir = os.path.join(res_dir, backend)
+        if os.path.isdir(back_dir):
+            report.append(f'\n## Backend: {backend}')
+            for test_case in os.listdir(back_dir):
+                meta_path = os.path.join(back_dir, test_case, 'metadata.json')
+                if os.path.exists(meta_path):
+                    with open(meta_path, 'r') as f:
+                        data = json.load(f)
+                    stat = '✅ PASS' if data.get('success', False) else '❌ FAIL'
+                    report.append(f'- **{test_case}**: {stat}')
+    with open(os.path.join(res_dir, 'final_report.md'), 'w') as f:
+        f.write('\n'.join(report))
+    print(f'Report written to {res_dir}/final_report.md')
+"

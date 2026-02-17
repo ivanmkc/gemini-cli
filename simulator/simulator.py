@@ -462,6 +462,17 @@ class SimulationRunner:
                 metadata_path = os.path.join(case_out_dir, "metadata.json")
                 if harness.extract_latest_session(target_path=metadata_path):
                     print(f"Metadata extracted to {metadata_path}")
+                else:
+                    # Write fallback metadata if the tool does not automatically export json sessions
+                    fallback_data = {
+                        "case_name": case.name,
+                        "backend": backend,
+                        "success": success,
+                        "reactors": [r.reactor_type for r in case.reactors]
+                    }
+                    with open(metadata_path, 'w', encoding='utf-8') as f:
+                        json.dump(fallback_data, f, indent=2)
+                    print(f"Fallback metadata written to {metadata_path}")
                     
                 # Extract structured output if requested
                 output_json_path = os.path.join(tmp_dir, "output.json")

@@ -13,43 +13,57 @@ to simulate multi-turn interactions with the user simulator LLM
 the `packages/cli` codebase, allowing robust integration testing on the
 production bundle.
 
-## Subdirectories
+The simulator can interchangeably invoke standard CLI binaries (using the
+`InteractiveSimulationCase` abstraction).
 
-- `simulator.py`: the main test orchestrator (`SimulationRunner`).
-- `tests/unit/`: Contains infrastructure unit tests (e.g., `test_harness.py`).
-- `tests/integration/`: Contains automated multi-turn workflow scripts like:
-  - `test_tools.py`
-  - `test_secret_retrieval.py`
-  - `test_skills.py`
-  - `test_mcp.py`
-  - `test_file_write.py`
+- **gemini-cli**: The primary target. Uses experimental
+  `GEMINI_APPROVAL_MODE=yolo`.
+- **claude-code**: Evaluated side-by-side using Anthropic's node CLI.
 
-## Running Tests
+## Running Tests Local
 
-Execute tests natively utilizing `uv`:
-
-```bash
-# Run Unit Tests
-uv run pytest tests/unit
-
-# Run Integration tests
-uv run tests/integration/test_tools.py
-uv run tests/integration/test_secret_retrieval.py
-```
-
-All interactions will be logged as human-readable transcripts to
-`session_*.log`, and all precise backend LLM outputs (thoughts, arrays,
-parameters) are saved to `metadata_*.json`.
-
-## Standalone Container Environment
-
-You can configure and run the validation suite completely independent of the
-GitHub repository context by utilizing the bundled Dockerfile. It provisions the
-environment, globally installs `@google/gemini-cli` from NPM, configures Python,
-and runs the entire suite autonomously:
+Execute tests natively utilizing `pytest`:
 
 ```bash
 cd simulator
-podman build -t gemini-simulator .
-podman run --rm -e GEMINI_API_KEY="YOUR_KEY_HERE" gemini-simulator
+python3 -m pytest tests/integration/ --backend=gemini-cli
 ```
+
+## Running Tests Hermetically (Podman)
+
+You can run the validation suite completely independent of the GitHub repository
+context inside Podman. It globally installs the CLI bundles and routes tests
+identically to ensure consistent framework metrics.
+
+1. **Authentication:** Create a `.env` file in the `simulator/` directory
+   explicitly stipulating test overrides. The host `GEMINI_API_KEY` is bound
+   automatically via `~/.gemini/settings.json`, but Claude Code requires you to
+   map the Auth key:
+   ```env
+   ANTHROPIC_API_KEY="sk-ant-..."
+   ```
+2. **Execution:** Launch the wrapper shell script which will autonomously build
+   the `Dockerfile` implementations, run `pytest`, and dump testing artifacts
+   organized by a strict `RUN_TIMESTAMP`.
+   ```bash
+   ./podman_test.sh
+   ```
+
+_(Note: The `claude-code` container will additionally mount your
+`~/.claude.json` configuration locally if you choose to bypass the `.env` token
+and use standard Claude API authentication using a DevContainer mechanism)_
+
+## Test Artifacts & Logs
+
+After a run is completed, outputs are routed into heavily organized timestamp
+folders mapping backend performance characteristics side-by-side.
+
+All interaction trails are logged into:
+
+- `outputs/<run_timestamp>/<backend>/<case>/session.log`
+- `outputs/<run_timestamp>/<backend>/<case>/metadata.json`
+
+At the climax of the test suite execution, the `podman_test.sh` orchestration
+script will evaluate all metrics to compile and export:
+
+- `outputs/<run_timestamp>/final_report.md`
