@@ -16,6 +16,13 @@ if [ -z "$ANTHROPIC_API_KEY" ]; then
     export ANTHROPIC_API_KEY=$(python3 -c "import json, os; print(json.load(open(os.path.expanduser('~/.gemini/settings.json'))).get('apiKeys', {}).get('anthropic', '') if os.path.exists(os.path.expanduser('~/.gemini/settings.json')) else '')" 2>/dev/null || echo "")
 fi
 
+if [ -z "$GEMINI_API_KEY" ]; then
+    echo "Error: GEMINI_API_KEY is missing. Please set it in .env or ~/.gemini/settings.json"
+    exit 1
+fi
+
+
+
 # Generate timestamp for output consolidation
 RUN_TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 export RUN_TIMESTAMP
@@ -23,6 +30,7 @@ echo "Test Run Timestamp: ${RUN_TIMESTAMP}"
 
 RUN_OUT_DIR="outputs/${RUN_TIMESTAMP}"
 mkdir -p "${RUN_OUT_DIR}"
+chmod 777 "${RUN_OUT_DIR}"
 
 # Bootstrap Anthropic DevContainer Auth
 if [ ! -f "$HOME/.claude.json" ]; then
@@ -42,6 +50,7 @@ fi
 CLAUDE_MOUNT=""
 if [ -f "$HOME/.claude.json" ]; then
     cp "$HOME/.claude.json" "${RUN_OUT_DIR}/.claude.json"
+    chmod 666 "${RUN_OUT_DIR}/.claude.json"
     CLAUDE_MOUNT="-v $(pwd)/${RUN_OUT_DIR}/.claude.json:/root/.claude.json"
 fi
 
@@ -50,6 +59,10 @@ podman build -t simulator-test-gemini -f Dockerfile.gemini .
 
 echo "=== Building Claude Test Image ==="
 podman build -t simulator-test-claude -f Dockerfile.claude .
+
+# Pre-create debug.log with write permissions so the non-root container can write to it
+touch debug.log
+chmod 666 debug.log
 
 echo "=== Running Simulation Tests in Podman: Gemini CLI ==="
 podman run --rm \
@@ -60,12 +73,13 @@ podman run --rm \
     -e GOOGLE_GENAI_USE_VERTEXAI="${GOOGLE_GENAI_USE_VERTEXAI}" \
     -e GOOGLE_CLOUD_PROJECT="${GOOGLE_CLOUD_PROJECT}" \
     -e GOOGLE_CLOUD_LOCATION="${GOOGLE_CLOUD_LOCATION}" \
+    -e PYTHONDONTWRITEBYTECODE=1 \
     simulator-test-gemini \
     bash -c "\
         python3 -m venv venv-linux && \
         ./venv-linux/bin/pip install pydantic google-genai pytest pexpect --index-url=https://pypi.org/simple && \
         echo \"=== Running Tests: Gemini CLI ===\" && \
-        ./venv-linux/bin/pytest tests/integration/ --backend=gemini-cli --output-dir=/workspace/simulator/outputs/${RUN_TIMESTAMP}" || true
+        ./venv-linux/bin/pytest tests/integration/ -o cache_dir=/tmp/.pytest_cache --backend=gemini-cli --output-dir=/workspace/simulator/outputs/${RUN_TIMESTAMP}" || true
 
 echo "=== Running Simulation Tests in Podman: Claude Code ==="
 podman run --rm \
@@ -77,12 +91,13 @@ podman run --rm \
     -e GOOGLE_GENAI_USE_VERTEXAI="${GOOGLE_GENAI_USE_VERTEXAI}" \
     -e GOOGLE_CLOUD_PROJECT="${GOOGLE_CLOUD_PROJECT}" \
     -e GOOGLE_CLOUD_LOCATION="${GOOGLE_CLOUD_LOCATION}" \
+    -e PYTHONDONTWRITEBYTECODE=1 \
     simulator-test-claude \
     bash -c "\
-        python3 -m venv venv-linux && \
-        ./venv-linux/bin/pip install pydantic google-genai pytest pexpect --index-url=https://pypi.org/simple && \
+        python3 -m venv /tmp/venv-linux && \
+        /tmp/venv-linux/bin/pip install pydantic google-genai pytest pexpect --index-url=https://pypi.org/simple && \
         echo \"=== Running Tests: Claude Code ===\" && \
-        ./venv-linux/bin/pytest tests/integration/ --backend=claude-code --output-dir=/workspace/simulator/outputs/${RUN_TIMESTAMP}" || true
+        /tmp/venv-linux/bin/pytest tests/integration/ -o cache_dir=/tmp/.pytest_cache --backend=claude-code --output-dir=/workspace/simulator/outputs/${RUN_TIMESTAMP}" || true
 
 echo "=== Generating Final Summary Report ==="
 python3 -c "

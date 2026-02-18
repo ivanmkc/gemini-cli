@@ -104,7 +104,7 @@ class GeminiCliHarness(BaseSimulatorHarness):
 
 class ClaudeCodeHarness(BaseSimulatorHarness):
     def get_base_cmd(self, py_dir: str) -> list[str]:
-        base_cmd = ["npx", "-y", "@anthropic-ai/claude-code"]
+        base_cmd = ["npx", "-y", "@anthropic-ai/claude-code", "--dangerously-skip-permissions"]
         print(f"Using Claude Code backend: {base_cmd}")
         return base_cmd
 
@@ -462,6 +462,16 @@ class SimulationRunner:
                 metadata_path = os.path.join(case_out_dir, "metadata.json")
                 if harness.extract_latest_session(target_path=metadata_path):
                     print(f"Metadata extracted to {metadata_path}")
+                    # Inject simulation success status into the extracted metadata
+                    try:
+                        with open(metadata_path, 'r', encoding='utf-8') as f:
+                            meta_data = json.load(f)
+                        meta_data['success'] = success
+                        with open(metadata_path, 'w', encoding='utf-8') as f:
+                            json.dump(meta_data, f, indent=2)
+                        print(f"Injected success={success} into metadata.json")
+                    except Exception as e:
+                        print(f"Failed to inject success status into metadata: {e}")
                 else:
                     # Write fallback metadata if the tool does not automatically export json sessions
                     fallback_data = {

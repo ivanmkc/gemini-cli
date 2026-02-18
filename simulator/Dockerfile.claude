@@ -19,5 +19,8 @@ WORKDIR /workspace
 ENV CLAUDE_TEST_MODE=1
 ENV NO_COLOR=1
 
+# Switch to non-root user for security (required by --dangerously-skip-permissions)
+USER node
+
 # Command to be overridden by the test script
 CMD ["bash"]
