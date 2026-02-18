@@ -24,6 +24,21 @@ echo "Test Run Timestamp: ${RUN_TIMESTAMP}"
 RUN_OUT_DIR="outputs/${RUN_TIMESTAMP}"
 mkdir -p "${RUN_OUT_DIR}"
 
+# Bootstrap Anthropic DevContainer Auth
+if [ ! -f "$HOME/.claude.json" ]; then
+    echo "=== Anthropic Credentials Not Found ==="
+    echo "To test the claude-code backend hermetically, you must authenticate once."
+    echo "Launching an interactive one-time setup container..."
+    
+    # Run a tiny ephemeral node container explicitly to capture the login callback
+    podman run -it --rm \
+        -v "$HOME":/root \
+        node:20-slim \
+        bash -c "npm install -g @anthropic-ai/claude-code && claude login" || true
+        
+    echo "Login capture complete."
+fi
+
 CLAUDE_MOUNT=""
 if [ -f "$HOME/.claude.json" ]; then
     cp "$HOME/.claude.json" "${RUN_OUT_DIR}/.claude.json"

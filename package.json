@@ -126,6 +126,7 @@
     "yargs": "^17.7.2"
   },
   "dependencies": {
+    "@anthropic-ai/claude-code": "^2.1.45",
     "ink": "npm:@jrichman/ink@6.4.10",
     "latest-version": "^9.0.0",
     "proper-lockfile": "^4.1.2",
