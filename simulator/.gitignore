@@ -1,7 +1,8 @@
 __pycache__/
-*.log
-metadata_*.json
-structured_metadata*.json
-tmp_agent_state.json
-test_out*.txt
+*.pyc
 .env
+.DS_Store
+outputs/
+venv-linux/
+.pytest_cache/
+debug.log

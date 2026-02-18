@@ -19,6 +19,12 @@ The simulator can interchangeably invoke standard CLI binaries (using the
 - **gemini-cli**: The primary target. Uses experimental
   `GEMINI_APPROVAL_MODE=yolo`.
 - **claude-code**: Evaluated side-by-side using Anthropic's node CLI.
+- **antigravity**: Internal agentic framework backend.
+- **codex**: Experimental backend.
+
+> **Note**: The harness includes automatic retry logic for
+> `429 RESOURCE_EXHAUSTED` errors from the Gemini API to verify agent behavior
+> robustly even under rate limits.
 
 ## Running Tests Local
 
